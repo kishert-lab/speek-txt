@@ -1,5 +1,7 @@
 # Meeting Protocol API
 
+Полная русскоязычная документация: [docs/README.md](docs/README.md).
+
 Локальный сервис распознавания и протоколирования заседаний, совещаний и конференций. Сервис принимает длинные аудио- и видеофайлы, сохраняет исходник, ставит задачу в очередь Celery, формирует стенограмму с говорящими и экспортирует результат в `JSON`, `TXT` и `DOCX`.
 
 ## Требования
@@ -37,39 +39,53 @@ dictionaries/
 ## Запуск
 
 1. Создать `.env` на основе `.env.example`.
-2. Положить локальные модели в `models/`.
+2. Однократно загрузить модели в каталог хоста `./models`. Для diarization временно укажите `HF_TOKEN` в окружении команды:
+
+```bash
+export HF_TOKEN='<token>'
+make models-download
+unset HF_TOKEN
+```
+
+Команда проверяет существующие файлы и не скачивает их повторно. Модели не включаются в Docker-образы и не отправляются в registry.
+
 3. При необходимости положить словари в `dictionaries/`.
 4. Собрать и запустить сервис:
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose logs -f worker
+make docker-build
+make docker-up
 ```
 
-CPU-вариант:
+`make docker-up` подключает GPU к worker только при наличии NVIDIA GPU. На CPU-хосте worker стартует без CUDA.
 
-```bash
-docker compose up -d api worker redis
+Внешний доступ идёт только через Nginx:
+
+```text
+http://<host>/              frontend
+http://<host>/api/...       API
+http://<host>/health/live   health-check
 ```
 
-GPU-вариант:
+Порты API и frontend не публикуются отдельно. Порт Nginx настраивается переменной `HTTP_PORT` (по умолчанию `80`).
 
-```bash
-docker compose up -d
-```
+## Docker-образы
 
-`worker` в `docker-compose.yml` настроен на `gpus: all`.
+- `api`: HTTP API без ML-зависимостей и моделей.
+- `worker`: PyTorch/CUDA, GigaAM и pyannote, без файлов моделей.
+- `frontend`: статическая Vite-сборка.
+- `nginx`: единая внешняя точка входа.
+
+`docker compose push` публикует только эти образы. Модели хранятся в `./models` на сервере и повторно не скачиваются при сборке или push.
 
 ## API
 
-Swagger: `http://localhost:8000/docs`
+Swagger: `http://localhost/docs`
 
 Загрузка файла:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/protocols \
-  -H "X-API-Key: change-me" \
+curl -X POST http://localhost/api/v1/protocols \
   -F "file=@meeting.m4a" \
   -F "title=Рабочее совещание" \
   -F "meeting_type=conference" \
@@ -81,20 +97,19 @@ curl -X POST http://localhost:8000/api/v1/protocols \
 Получение статуса:
 
 ```bash
-curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>
+curl http://localhost/api/v1/protocols/<job_id>
 ```
 
 Получение результата:
 
 ```bash
-curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>/result
+curl http://localhost/api/v1/protocols/<job_id>/result
 ```
 
 Назначение имён спикерам:
 
 ```bash
-curl -X PATCH http://localhost:8000/api/v1/protocols/<job_id>/speakers \
-  -H "X-API-Key: change-me" \
+curl -X PATCH http://localhost/api/v1/protocols/<job_id>/speakers \
   -H "Content-Type: application/json" \
   -d '{"speakers":{"SPEAKER_00":"Иванов Иван Иванович"}}'
 ```
@@ -102,9 +117,9 @@ curl -X PATCH http://localhost:8000/api/v1/protocols/<job_id>/speakers \
 Скачивание файлов:
 
 ```bash
-curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>/files/json
-curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>/files/txt
-curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>/files/docx
+curl http://localhost/api/v1/protocols/<job_id>/files/json
+curl http://localhost/api/v1/protocols/<job_id>/files/txt
+curl http://localhost/api/v1/protocols/<job_id>/files/docx
 ```
 
 ## Health checks
@@ -112,11 +127,9 @@ curl -H "X-API-Key: change-me" http://localhost:8000/api/v1/protocols/<job_id>/f
 - `GET /health/live`
 - `GET /health/ready`
 
-`ready` проверяет Redis, `ffmpeg`, `ffprobe`, каталог `/data`, checkpoint и tokenizer GigaAM, а также наличие CUDA при `ASR_DEVICE=cuda`.
+`ready` проверяет Redis, `ffmpeg`, `ffprobe`, каталог `/data`, checkpoint и tokenizer GigaAM при выключенной автозагрузке, а также наличие CUDA при `ASR_DEVICE=cuda`.
 
 ## Тесты
-
-Настройка PyAnnote через ENV, диагностика и методика оценки качества описаны в [docs/diarization-configuration.md](docs/diarization-configuration.md).
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -125,8 +138,11 @@ python -m pytest
 
 ## Типичные ошибки
 
-- `MODEL_NOT_FOUND`: отсутствует `models/gigaam/v3_e2e_rnnt.ckpt`
-- `TOKENIZER_NOT_FOUND`: отсутствует `models/gigaam/v3_e2e_rnnt_tokenizer.model`
+- `MODEL_NOT_FOUND`: отсутствует `models/gigaam/v3_e2e_rnnt.ckpt` при `GIGAAM_DOWNLOAD_ENABLED=false`
+- `TOKENIZER_NOT_FOUND`: отсутствует `models/gigaam/v3_e2e_rnnt_tokenizer.model` при `GIGAAM_DOWNLOAD_ENABLED=false`
+- `MODEL_DOWNLOAD_FAILED`: не удалось загрузить или проверить опубликованную GigaAM-модель
+
+После загрузки оставьте `GIGAAM_DOWNLOAD_ENABLED=false`, чтобы worker работал только с локальными файлами.
 - `UNSUPPORTED_MEDIA`: неподдерживаемый формат или файл не проходит `ffprobe`
 - `DIARIZATION_UNAVAILABLE`: локальная модель диаризации не найдена, включён single-speaker fallback
 
@@ -134,9 +150,9 @@ python -m pytest
 
 - Поле `protocol.decisions` пока не заполняется автоматически.
 - Реальная диаризация зависит от локально установленной модели и `pyannote.audio`.
-- Интеграция GigaAM реализована только через локальные файлы; сервис принципиально не скачивает модели автоматически.
+- Модели загружаются отдельной командой `make models-download` и хранятся в `models/` рядом с Compose-файлом.
 - Периодическая очистка старых заданий ещё не вынесена в отдельный beat-процесс.
 
 ## Приватность
 
-Сервис не отправляет аудио, стенограммы и протоколы во внешние облачные сервисы. Все данные обрабатываются локально, модели должны быть размещены заранее в локальных каталогах `models/` и `dictionaries/`.
+Сервис не отправляет аудио, стенограммы и протоколы во внешние сервисы. При включённой автозагрузке наружу обращается только за публичными файлами GigaAM; после скачивания обработка данных выполняется локально.
